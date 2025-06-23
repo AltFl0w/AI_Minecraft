@@ -4,18 +4,18 @@ FROM node:18
 # Set working directory
 WORKDIR /usr/src/app
 
-# Copy and install just one simple dependency
+# Copy and install dependencies
 COPY package.json ./
-RUN npm install
+RUN npm install --production
 
 # Copy app
 COPY . .
 
-# Create directories
+# Create necessary directories
 RUN mkdir -p logs structures
 
 # Expose port (if needed for future web interface)
 EXPOSE 3000
 
-# Test command
-CMD ["echo", "Docker build successful!"]
+# Start the bot
+CMD ["npm", "start"]
