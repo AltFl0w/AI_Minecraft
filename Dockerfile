@@ -1,23 +1,29 @@
-# Use the official Node.js 18 LTS image
-FROM node:18-alpine
+# Use standard Node.js image
+FROM node:18
 
 # Set working directory
 WORKDIR /usr/src/app
 
-# Copy package files first for better caching
-COPY package*.json ./
+# Copy package.json and install dependencies
+COPY package.json ./
 
-# Install dependencies with verbose logging for debugging
-RUN npm ci --only=production --verbose
+# Debug: Show what we're trying to install
+RUN echo "=== Package.json contents ===" && cat package.json
+
+# Try to install dependencies with more verbose output
+RUN npm install --production --verbose || (echo "NPM install failed" && exit 1)
+
+# Debug: Show what was installed
+RUN echo "=== Installed packages ===" && ls -la node_modules/
 
 # Copy the rest of the application
 COPY . .
 
-# Create necessary directories
+# Create directories
 RUN mkdir -p logs structures
 
 # Expose port (if needed for future web interface)
 EXPOSE 3000
 
-# Set the command to run the bot
-CMD ["npm", "start"]
+# Start the bot directly
+CMD ["node", "mineflayer-bot/index.js"]
