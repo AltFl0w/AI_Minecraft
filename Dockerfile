@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# Fix common Docker npm install SSL issues
+RUN npm config set strict-ssl false
+
 # Copy and install dependencies
 COPY package.json ./
 RUN npm install --production
