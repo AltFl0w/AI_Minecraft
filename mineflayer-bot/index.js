@@ -1,4 +1,4 @@
-import mineflayer from 'mineflayer';
+import { createClient } from 'bedrock-protocol';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import fs from 'fs/promises';
 import path from 'path';
@@ -17,11 +17,12 @@ class MinecraftAIBot {
 
     this.genAI = new GoogleGenerativeAI(config.ai.apiKey);
     this.model = this.genAI.getGenerativeModel({ model: config.ai.model });
-    this.bot = null;
+    this.client = null;
     this.commandHistory = [];
     this.structures = new Map();
-    this.commandHandler = new CommandHandler(null, this.model); // Bot will be set later
+    this.commandHandler = new CommandHandler(null, this.model); // Client will be set later
     this.lastCommandTime = new Map(); // For cooldown tracking
+    this.isConnected = false;
     
     // Load structure mappings
     this.loadStructures();
@@ -51,56 +52,133 @@ class MinecraftAIBot {
   }
 
   createBot() {
-    this.bot = mineflayer.createBot({
-      host: config.server.ip,
-      port: config.server.port,
-      username: config.server.botName,
-      version: false
-    });
+    console.log(`🔌 Connecting to Bedrock server ${config.server.ip}:${config.server.port}...`);
+    
+    try {
+              this.client = createClient({
+          host: config.server.ip,
+          port: config.server.port,
+          username: config.server.botName,
+          offline: false // Xbox Live authentication required
+        });
 
-    // Update command handler with bot reference
-    this.commandHandler.bot = this.bot;
+      // Update command handler with client reference
+      this.commandHandler.bot = this.client;
 
-    this.setupEventHandlers();
+      this.setupEventHandlers();
+    } catch (error) {
+      console.error('❌ Error creating client:', error);
+      if (config.bot.autoReconnect) {
+        console.log(`🔄 Retrying connection in ${config.bot.reconnectDelay / 1000} seconds...`);
+        setTimeout(() => this.createBot(), config.bot.reconnectDelay);
+      }
+    }
   }
 
   setupEventHandlers() {
-    this.bot.on('login', () => {
-      console.log(`✓ Bot logged in as ${this.bot.username}`);
-      console.log(`✓ Connected to ${config.server.ip}:${config.server.port}`);
-      this.bot.chat('🤖 AI Admin Bot is online! Use @admin to interact with me.');
+    this.client.on('spawn', () => {
+      console.log(`✅ Bot successfully logged in as ${config.server.botName}`);
+      console.log(`✅ Connected to ${config.server.ip}:${config.server.port}`);
+      this.isConnected = true;
+      console.log('🤖 AI Admin Bot is online! Ready to respond to @admin commands.');
     });
 
-    this.bot.on('error', (err) => {
+    this.client.on('error', (err) => {
       console.error('❌ Bot error:', err);
+      this.isConnected = false;
     });
 
-    this.bot.on('end', (reason) => {
+    this.client.on('disconnect', (reason) => {
       console.log(`❌ Bot disconnected: ${reason}`);
+      this.isConnected = false;
       if (config.bot.autoReconnect) {
         console.log(`🔄 Reconnecting in ${config.bot.reconnectDelay / 1000} seconds...`);
         setTimeout(() => this.createBot(), config.bot.reconnectDelay);
       }
     });
 
-    this.bot.on('chat', async (username, message) => {
-      if (username === this.bot.username) return;
-      
-      await this.handleChatMessage(username, message);
+    // Log all packets to understand the structure
+    this.client.on('packet', (data) => {
+      if (data.name === 'text') {
+        console.log('📝 Received text packet:', JSON.stringify(data.params, null, 2));
+      }
     });
 
-    this.bot.on('spawn', () => {
-      console.log('✓ Bot spawned in world');
+    this.client.on('text', async (packet) => {
+      // Handle chat messages from Bedrock protocol
+      console.log('💬 Text event:', JSON.stringify(packet, null, 2));
+      
+      // Check different possible structures
+      if (packet.type === 'chat' && packet.source_name && packet.message) {
+        const username = packet.source_name;
+        const message = packet.message;
+        
+        console.log(`💬 Chat from ${username}: ${message}`);
+        
+        if (username === config.server.botName) return;
+        
+        await this.handleChatMessage(username, message);
+      }
     });
+
+    // Also listen for other possible chat events
+    this.client.on('packet', async (data) => {
+      if (data.name === 'text' && data.params) {
+        console.log('📦 Text packet:', JSON.stringify(data.params, null, 2));
+      }
+    });
+
+    this.client.on('join', () => {
+      console.log('✓ Bot joined the world');
+    });
+  }
+
+  // Helper method to send chat messages
+  sendChat(message) {
+    if (!this.isConnected) return;
+    
+    try {
+      this.client.write('text', {
+        type: 'chat',
+        needs_translation: false,
+        source_name: config.server.botName,
+        message: message,
+        parameters: [],
+        xuid: '',
+        platform_chat_id: ''
+      });
+    } catch (error) {
+      console.error('Error sending chat:', error);
+    }
+  }
+
+  // Helper method to execute commands
+  executeCommand(command) {
+    if (!this.isConnected) return;
+    
+    try {
+      this.client.write('command_request', {
+        command: command,
+        origin: {
+          type: 'player',
+          uuid: '',
+          request_id: ''
+        },
+        internal: false,
+        version: 1
+      });
+    } catch (error) {
+      console.error('Error executing command:', error);
+    }
   }
 
   async handleChatMessage(username, message) {
     // Skip if message is from the bot itself
-    if (username === this.bot.username) return;
+    if (username === config.server.botName) return;
     
     // Check if message is directed at the bot
     const isDirectedAtBot = message.toLowerCase().includes('@admin') || 
-                           message.toLowerCase().includes(this.bot.username.toLowerCase());
+                           message.toLowerCase().includes(config.server.botName.toLowerCase());
     
     if (!isDirectedAtBot) return;
     
@@ -113,7 +191,7 @@ class MinecraftAIBot {
     
     // Check cooldown
     if (this.isOnCooldown(username)) {
-      this.bot.chat(`⏰ Hey ${username}! Please wait a moment before asking again! ✨`);
+      this.sendChat(`⏰ Hey ${username}! Please wait a moment before asking again! ✨`);
       return;
     }
     
@@ -124,14 +202,14 @@ class MinecraftAIBot {
     const isAdmin = config.isAdmin(username);
     
     // Friendly greeting response
-    this.bot.chat(`👋 Hi ${username}! Let me help you with that! 🌟`);
+    this.sendChat(`👋 Hi ${username}! Let me help you with that! 🌟`);
     
     // Route to appropriate command handler using new knowledge-based system
     try {
       await this.processCommand(username, cleanMessage, isAdmin);
     } catch (error) {
       console.error(`❌ Error processing command:`, error);
-      this.bot.chat(`🤖 Oops! Something went wrong, ${username}! Let me try to help you another way! 🔧`);
+      this.sendChat(`🤖 Oops! Something went wrong, ${username}! Let me try to help you another way! 🔧`);
     }
   }
 
@@ -199,82 +277,81 @@ class MinecraftAIBot {
       return 'help';
     }
     
-    return 'generic';
+    return 'general';
   }
-
-  // Old command methods removed - now using unified knowledge-based handler
 
   async executeCommands(commands, isAdmin) {
     for (const command of commands) {
-      await this.executeCommand(command.trim(), isAdmin);
-      // Small delay between commands
-      await new Promise(resolve => setTimeout(resolve, config.bot.commandCooldown));
+      await this.executeCommand(command, isAdmin);
+      // Small delay between commands to prevent spam
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
   async executeCommand(command, isAdmin) {
-    // Sanitize and validate command
-    const sanitized = this.sanitizeCommand(command, isAdmin);
-    if (!sanitized) return;
-
-    if (config.bot.debugMode) {
-      console.log(`⚡ Executing: ${sanitized}`);
+    const sanitizedCommand = this.sanitizeCommand(command, isAdmin);
+    
+    if (!sanitizedCommand) {
+      console.log('❌ Command blocked by safety filter');
+      return;
     }
     
-    this.bot.chat(`/${sanitized}`);
-    
-    // Store in history
-    this.commandHistory.push({
-      command: sanitized,
-      timestamp: new Date(),
-      isAdmin
-    });
-
-    // Keep history manageable
-    if (this.commandHistory.length > 100) {
-      this.commandHistory = this.commandHistory.slice(-50);
+    try {
+      if (config.bot.debugMode) {
+        console.log(`🎮 Executing: ${sanitizedCommand}`);
+      }
+      
+      this.executeCommand(sanitizedCommand);
+      this.commandHistory.push({
+        command: sanitizedCommand,
+        timestamp: new Date().toISOString(),
+        isAdmin
+      });
+    } catch (error) {
+      console.error('❌ Command execution error:', error);
     }
   }
 
   sanitizeCommand(command, isAdmin = false) {
+    if (!command || typeof command !== 'string') return null;
+    
     // Remove leading slash if present
     command = command.replace(/^\/+/, '');
     
-    const firstWord = command.split(' ')[0].toLowerCase();
+    // Basic safety checks
+    const lowerCommand = command.toLowerCase();
+    const blockedCommands = ['stop', 'restart', 'ban', 'kick', 'whitelist', 'op', 'deop'];
     
-    // Check if command is allowed
-    if (!isCommandAllowed(command, 'system', isAdmin)) {
-      console.log(`🚫 Blocked unsafe command: ${command} (admin: ${isAdmin})`);
-      this.bot.chat(`🛡️ That command isn't safe for kids! Let's try something fun instead! ✨`);
-      return null;
+    if (!isAdmin) {
+      for (const blocked of blockedCommands) {
+        if (lowerCommand.startsWith(blocked)) {
+          return null;
+        }
+      }
     }
-
-    // Additional safety checks
-    if (command.includes('..') || command.includes('\\')) {
-      console.log(`🚫 Blocked potentially dangerous path: ${command}`);
-      this.bot.chat(`🛡️ That doesn't look safe! Let's stick to fun Minecraft commands! ✨`);
-      return null;
-    }
-
+    
     return command;
   }
 
   start() {
-    console.log('🚀 Starting Minecraft AI Admin Bot...');
-    console.log(`📡 Server: ${config.server.ip}:${config.server.port}`);
-    console.log(`🤖 Bot Name: ${config.server.botName}`);
+    console.log('🤖 Starting Minecraft AI Admin Bot...');
+    console.log(`🎮 Bot Name: ${config.server.botName}`);
+    console.log(`🌐 Target Server: ${config.server.ip}:${config.server.port}`);
     console.log(`🧠 AI Model: ${config.ai.model}`);
-    
-    if (config.bot.adminUsers.length > 0) {
-      console.log(`👑 Admin Users: ${config.bot.adminUsers.join(', ')}`);
-    } else {
-      console.log(`👑 Admin Users: All users (no restrictions)`);
-    }
     
     this.createBot();
   }
 }
 
-// Start the bot
-const aiBot = new MinecraftAIBot();
-aiBot.start();
+// Create and start the bot
+const bot = new MinecraftAIBot();
+bot.start();
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Shutting down bot...');
+  if (bot.client) {
+    bot.client.disconnect();
+  }
+  process.exit(0);
+});

@@ -6,7 +6,7 @@ export const config = {
   // Server connection
   server: {
     ip: process.env.SERVER_IP || 'localhost',
-    port: parseInt(process.env.PORT) || 19132,
+    port: parseInt(process.env.PORT) || 19133,
     botName: process.env.BOT_NAME || 'AI_Admin'
   },
 

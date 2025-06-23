@@ -4,8 +4,8 @@ import { PromptTranslator } from './prompt-translator.js';
 import { MinecraftKnowledge, MinecraftValidator } from './minecraft-knowledge.js';
 
 export class CommandHandler {
-  constructor(bot, aiModel) {
-    this.bot = bot;
+  constructor(client, aiModel) {
+    this.bot = client;
     this.aiModel = aiModel;
     this.gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     this.model = this.gemini.getGenerativeModel({ model: "gemini-pro" });
@@ -39,16 +39,62 @@ Examples of great responses:
 `;
   }
 
+  // Helper method to send chat messages
+  sendChat(message) {
+    if (!this.bot) return;
+    
+    try {
+      this.bot.write('text', {
+        type: 'chat',
+        needs_translation: false,
+        source_name: config.server.botName,
+        message: message,
+        parameters: [],
+        xuid: '',
+        platform_chat_id: ''
+      });
+    } catch (error) {
+      console.error('Error sending chat:', error);
+    }
+  }
+
+  // Helper method to execute commands
+  executeCommand(command, username) {
+    if (!this.bot) return;
+    
+    try {
+      // Remove leading slash if present
+      const cleanCommand = command.replace(/^\/+/, '');
+      
+      this.bot.write('command_request', {
+        command: cleanCommand,
+        origin: {
+          type: 'player',
+          uuid: '',
+          request_id: ''
+        },
+        internal: false,
+        version: 1
+      });
+      
+      if (config.bot.debugMode) {
+        console.log(`🎮 Executed command for ${username}: /${cleanCommand}`);
+      }
+    } catch (error) {
+      console.error('Error executing command:', error);
+      this.sendChat(`🔧 Something went wrong with that command, ${username}! Let's try something else! ✨`);
+    }
+  }
+
   async handleCommand(username, message, commandType) {
     try {
-      // Get player position for context
-      const player = this.bot.players[username];
-      const playerPosition = player ? player.entity?.position : null;
+      // Get player position for context (bedrock-protocol doesn't have easy player access like mineflayer)
+      const playerPosition = null; // We'll handle this differently in bedrock
 
       // Pre-validate the request for safety
       const validation = this.promptTranslator.validateRequest(message);
       if (!validation.isValid) {
-        this.bot.chat(`🚫 Oops ${username}! That's not something I can help with. Let's try something fun instead! 🎮`);
+        this.sendChat(`🚫 Oops ${username}! That's not something I can help with. Let's try something fun instead! 🎮`);
         return;
       }
 
@@ -60,7 +106,7 @@ Examples of great responses:
         playerPosition
       );
 
-      if (this.config.bot.debugMode) {
+      if (config.bot.debugMode) {
         console.log(`🧠 Generated structured prompt for ${username}:`, structuredPrompt.substring(0, 200) + '...');
       }
 
@@ -72,7 +118,7 @@ Examples of great responses:
       const parsed = this.parseAIResponse(response);
       
       if (parsed.chat) {
-        this.bot.chat(parsed.chat);
+        this.sendChat(parsed.chat);
       }
       
       if (parsed.command) {
@@ -80,13 +126,13 @@ Examples of great responses:
         if (this.isCommandSafe(parsed.command)) {
           this.executeCommand(parsed.command, username);
         } else {
-          this.bot.chat(`🛡️ That command isn't safe for kids, ${username}! Let's try something else fun! ✨`);
+          this.sendChat(`🛡️ That command isn't safe for kids, ${username}! Let's try something else fun! ✨`);
         }
       }
 
     } catch (error) {
       console.error(`❌ Error handling command for ${username}:`, error);
-      this.bot.chat(`🤖 Oops! Something went wrong, ${username}! Let me try to help you another way! 🔧`);
+      this.sendChat(`🤖 Oops! Something went wrong, ${username}! Let me try to help you another way! 🔧`);
     }
   }
 
@@ -136,22 +182,6 @@ Examples of great responses:
     return true;
   }
 
-  /**
-   * Execute the validated command
-   */
-  executeCommand(command, username) {
-    try {
-      if (this.config.bot.debugMode) {
-        console.log(`🎮 Executing command for ${username}: ${command}`);
-      }
-      
-      this.bot.chat(`/${command}`);
-    } catch (error) {
-      console.error(`❌ Error executing command:`, error);
-      this.bot.chat(`🔧 Something went wrong with that command, ${username}! Let's try something else! ✨`);
-    }
-  }
-
   async handleGiveCommand(username, message) {
     try {
       const prompt = `
@@ -183,7 +213,7 @@ Respond with ONLY the /give command, nothing else:
       const result = await this.model.generateContent(prompt);
       const response = result.response.text().trim();
       
-      this.bot.chat(`🎁 Coming right up! ${response.includes('✨') ? '' : '✨'}`);
+      this.sendChat(`🎁 Coming right up! ${response.includes('✨') ? '' : '✨'}`);
       
       if (response.startsWith('/give')) {
         return response;
@@ -192,175 +222,160 @@ Respond with ONLY the /give command, nothing else:
       }
     } catch (error) {
       console.error('❌ Give command error:', error);
-      this.bot.chat("🎁 Oops! Let me get you something awesome instead! ✨");
+      this.sendChat("🎁 Oops! Let me get you something awesome instead! ✨");
       return `/give ${username} diamond 1`;
     }
   }
 
   async handleTeleportCommand(username, message) {
-    const msg = message.toLowerCase();
-    
-    // Handle common teleport patterns directly
-    if (msg.includes('come here') || msg.includes('come to me')) {
-      return `tp ${this.bot.username} ${username}`;
-    }
-    
-    if (msg.includes('spawn')) {
-      return `tp ${username} 0 70 0`;
-    }
-
-    // Use AI for complex teleport requests
-    const prompt = `Convert this teleport request to a Minecraft command: "${message}"
-    
-    Player requesting: ${username}
-    Bot name: ${this.bot.username}
-    
-    Rules:
-    - Use /tp commands
-    - If they want bot to come to them: tp ${this.bot.username} ${username}
-    - If they want to go somewhere: tp ${username} [coordinates or location]
-    - Common locations: spawn (0 70 0), sky (~ 200 ~), underground (~ 10 ~)
-    - Only return the command, no explanation
-    
-    Examples:
-    "come here" -> tp ${this.bot.username} ${username}
-    "tp me to spawn" -> tp ${username} 0 70 0
-    "take me up high" -> tp ${username} ~ 200 ~`;
-
     try {
-      const result = await this.aiModel.generateContent(prompt);
-      return result.response.text().trim();
+      const prompt = `
+${this.childSafeContext}
+
+🚀 TELEPORT COMMAND HELPER 🚀
+
+A kid named ${username} wants to teleport in Minecraft! Help them with the right command.
+
+What they said: "${message}"
+
+TELEPORT OPTIONS:
+- To spawn: /tp ${username} 0 64 0
+- To a player: /tp ${username} [player_name]
+- To coordinates: /tp ${username} [x] [y] [z]
+
+RULES:
+- Keep coordinates reasonable (not too far from spawn)
+- Y coordinate should be at least 60 (above ground)
+- Be encouraging about their teleport request!
+
+Respond with ONLY the /tp command, nothing else:
+`;
+
+      const result = await this.model.generateContent(prompt);
+      const response = result.response.text().trim();
+      
+      this.sendChat(`🚀 Teleporting you somewhere awesome! ✨`);
+      
+      if (response.startsWith('/tp')) {
+        return response;
+      } else {
+        return `/tp ${username} 0 64 0`;
+      }
     } catch (error) {
-      console.error('AI Error in teleport command:', error);
-      return `tp ${this.bot.username} ${username}`; // Fallback
+      console.error('❌ Teleport command error:', error);
+      this.sendChat("🚀 Let me teleport you to spawn! ✨");
+      return `/tp ${username} 0 64 0`;
     }
   }
 
   handleGamemodeCommand(username, message) {
-    const msg = message.toLowerCase();
-    let gamemode = 'survival';
+    const lowerMessage = message.toLowerCase();
     
-    if (msg.includes('creative')) gamemode = 'creative';
-    else if (msg.includes('adventure')) gamemode = 'adventure';
-    else if (msg.includes('spectator')) gamemode = 'spectator';
-    
-    return `gamemode ${gamemode} ${username}`;
+    if (lowerMessage.includes('creative')) {
+      this.sendChat(`🎨 Switching you to Creative mode for unlimited building! ✨`);
+      return `/gamemode creative ${username}`;
+    } else if (lowerMessage.includes('survival')) {
+      this.sendChat(`⚔️ Switching you to Survival mode for adventure! ✨`);
+      return `/gamemode survival ${username}`;
+    } else {
+      this.sendChat(`🎮 Which gamemode would you like? Creative or Survival? ✨`);
+      return null;
+    }
   }
 
   handleTimeCommand(username, message) {
-    const msg = message.toLowerCase();
-    let time = 'day';
+    const lowerMessage = message.toLowerCase();
     
-    if (msg.includes('night') || msg.includes('dark')) time = 'night';
-    else if (msg.includes('noon') || msg.includes('mid')) time = 'noon';
-    else if (msg.includes('midnight')) time = 'midnight';
-    else if (msg.includes('sunrise') || msg.includes('dawn')) time = 'sunrise';
-    else if (msg.includes('sunset') || msg.includes('dusk')) time = 'sunset';
-    
-    return `time set ${time}`;
+    if (lowerMessage.includes('day') || lowerMessage.includes('morning')) {
+      this.sendChat(`☀️ Making it a beautiful day! ✨`);
+      return `/time set day`;
+    } else if (lowerMessage.includes('night') || lowerMessage.includes('evening')) {
+      this.sendChat(`🌙 Setting it to peaceful night time! ✨`);
+      return `/time set night`;
+    } else {
+      this.sendChat(`🕐 Would you like it to be day or night? ✨`);
+      return null;
+    }
   }
 
   handleWeatherCommand(username, message) {
-    const msg = message.toLowerCase();
-    let weather = 'clear';
+    const lowerMessage = message.toLowerCase();
     
-    if (msg.includes('rain') || msg.includes('storm')) weather = 'rain';
-    else if (msg.includes('thunder')) weather = 'thunder';
-    else if (msg.includes('clear') || msg.includes('sunny')) weather = 'clear';
-    
-    return `weather ${weather}`;
+    if (lowerMessage.includes('clear') || lowerMessage.includes('sun')) {
+      this.sendChat(`☀️ Clearing up the weather for you! ✨`);
+      return `/weather clear`;
+    } else if (lowerMessage.includes('rain')) {
+      this.sendChat(`🌧️ Making it rain! ✨`);
+      return `/weather rain`;
+    } else {
+      this.sendChat(`🌤️ Would you like sunny or rainy weather? ✨`);
+      return null;
+    }
   }
 
   async handleBuildCommand(username, message, structures) {
-    // First check for structure matches
-    const structureMatch = this.findStructureMatch(message, structures);
-    if (structureMatch) {
-      return {
-        type: 'structure',
-        structure: structureMatch,
-        message: `Building ${structureMatch} structure for you!`
-      };
-    }
-
-    // Use AI for custom builds
-    const availableStructures = Array.from(structures.keys()).join(', ');
-    const prompt = `
+    try {
+      const prompt = `
 ${this.childSafeContext}
 
 🏗️ BUILD COMMAND HELPER 🏗️
 
-A kid named ${username} wants to build something in Minecraft! This is so exciting! 🌟
+A kid named ${username} wants to build something in Minecraft!
 
 What they said: "${message}"
-Their position: x:${structures.get(structureMatch).x}, y:${structures.get(structureMatch).y}, z:${structures.get(structureMatch).z}
 
-AVAILABLE STRUCTURES IN /structures FOLDER:
-${this.config.getStructureAliases().map(alias => `- ${alias}`).join('\n')}
-
-YOUR JOB:
-1. Figure out what structure matches their request (be creative with matching!)
-2. Choose a good spot near them to build it
-3. Be super encouraging about their building idea!
+Available structures: ${structures ? Array.from(structures.keys()).join(', ') : 'house, castle, tower, bridge'}
 
 BUILDING RULES:
-- Build near the player (within 10 blocks)
-- Choose safe, flat ground when possible
-- Make it sound exciting and fun!
-- If no perfect match, pick the closest fun structure
+- Keep builds reasonable size (max 50x50x50 blocks)
+- Use safe, child-friendly designs
+- Be encouraging about their creativity!
+- If they want something not available, suggest alternatives
 
-Examples:
-"build a house" → house, cabin, or home structure
-"make a farm" → farm, barn, or animal structure  
-"build something for bears" → bear_habitat, bear_pen
-"create a castle" → castle, tower, or fortress
+Generate a series of /fill or /setblock commands to create their requested build.
+Keep it simple and fun!
 
-Respond with ONLY the structure command:
-/structure load [structure_name] ${Math.floor(structures.get(structureMatch).x + Math.random() * 10 - 5)} ${Math.floor(structures.get(structureMatch).y)} ${Math.floor(structures.get(structureMatch).z + Math.random() * 10 - 5)}
+Respond with up to 10 commands, one per line:
 `;
 
-    try {
       const result = await this.model.generateContent(prompt);
-      const response = result.response.text().trim();
+      const response = result.response.text();
       
-      this.bot.chat(`🏗️ Great building idea! Let me create something awesome for you! ✨`);
+      this.sendChat(`🏗️ Building something awesome for you! This might take a moment! ✨`);
       
-      if (response.includes('/structure load')) {
-        return response;
-      } else {
-        // Fallback to a simple house structure
-        const x = Math.floor(structures.get(structureMatch).x + 5);
-        const y = Math.floor(structures.get(structureMatch).y);
-        const z = Math.floor(structures.get(structureMatch).z + 5);
-        return `/structure load house ${x} ${y} ${z}`;
-      }
+      // Parse commands from response
+      const commands = response.split('\n')
+        .filter(line => line.trim().startsWith('/'))
+        .slice(0, 10); // Limit to 10 commands for safety
+      
+      return commands;
     } catch (error) {
       console.error('❌ Build command error:', error);
-      this.bot.chat("🏗️ Let me build you something super cool! 🌟");
-      const x = Math.floor(structures.get(structureMatch).x + 5);
-      const y = Math.floor(structures.get(structureMatch).y);
-      const z = Math.floor(structures.get(structureMatch).z + 5);
-      return `/structure load house ${x} ${y} ${z}`;
+      this.sendChat("🏗️ Let me build you a simple house instead! ✨");
+      return [
+        `/fill ~-2 ~-1 ~-2 ~2 ~3 ~2 cobblestone hollow`,
+        `/setblock ~ ~3 ~ torch`
+      ];
     }
   }
 
   findStructureMatch(message, structures) {
-    const msg = message.toLowerCase();
+    if (!structures || structures.size === 0) return null;
     
-    // Direct filename matches (without extension)
-    for (const [name, file] of structures) {
-      if (msg.includes(name)) {
-        return name;
+    const lowerMessage = message.toLowerCase();
+    
+    for (const [name, file] of structures.entries()) {
+      if (lowerMessage.includes(name)) {
+        return { name, file };
       }
     }
     
-    // Check aliases
-    for (const [alias, structureNames] of Object.entries(config.structures.aliases)) {
-      if (msg.includes(alias)) {
-        // Find the first matching structure file
-        for (const structureName of structureNames) {
-          if (structures.has(structureName)) {
-            return structureName;
-          }
+    // Check for partial matches
+    for (const [name, file] of structures.entries()) {
+      const words = name.split(/[_\s-]+/);
+      for (const word of words) {
+        if (word.length > 3 && lowerMessage.includes(word)) {
+          return { name, file };
         }
       }
     }
@@ -379,77 +394,58 @@ A kid named ${username} needs help with something in Minecraft!
 
 What they said: "${message}"
 
-COMMON MINECRAFT COMMANDS:
-- /gamemode creative (for building freely)
-- /gamemode survival (for adventure mode)
-- /time set day (make it sunny!)
-- /weather clear (stop the rain)
-- /tp [player] [x] [y] [z] (teleport somewhere)
-- /effect give [player] minecraft:speed 30 1 (make them fast!)
-- /effect give [player] minecraft:jump_boost 30 1 (make them jump high!)
+AVAILABLE COMMANDS:
+- /give [player] [item] [amount] - Give items
+- /tp [player] [location] - Teleport
+- /gamemode [creative/survival] [player] - Change gamemode  
+- /time set [day/night] - Change time
+- /weather [clear/rain] - Change weather
+- /fill [coords] [block] - Build with blocks
+- /setblock [coords] [block] - Place single block
 
-YOUR JOB:
-1. Understand what the kid wants to do
-2. Give them the right Minecraft command
-3. Make it sound fun and encouraging!
-4. If unsure, ask them to be more specific in a friendly way
+RULES:
+- Only use safe, child-friendly commands
+- Be encouraging and positive
+- If unsure, ask for clarification
+- Keep everything fun and creative!
 
-SAFETY RULES:
-- No dangerous commands (like /kill)
-- Keep effects short and fun (30 seconds max)
-- Use reasonable coordinates for teleporting
-- Always be encouraging!
+Respond in this format:
+CHAT: [Encouraging message to the child]
+COMMAND: [Single Minecraft command to help them]
 
-If it's not a command request, just be friendly and helpful!
-
-Respond with either:
-- A Minecraft command: /[command]
-- A friendly response if no command needed
+If you need more info, just respond with CHAT only.
 `;
 
       const result = await this.model.generateContent(prompt);
-      let response = result.response.text().trim();
+      const response = result.response.text();
       
-      // Add encouraging emoji if not present
-      if (!response.includes('✨') && !response.includes('🎮') && !response.includes('😊')) {
-        response += ' ✨';
-      }
-      
-      this.bot.chat(`🎮 ${response}`);
-      
-      // Check if response contains a command
-      if (response.includes('/')) {
-        const commandMatch = response.match(/\/\w+[^✨🎮😊]*/);
-        return commandMatch ? commandMatch[0].trim() : null;
-      }
-      
-      return null;
+      return this.parseAIResponse(response);
     } catch (error) {
       console.error('❌ Generic command error:', error);
-      this.bot.chat("🎮 I'm here to help make Minecraft super fun! Can you tell me more about what you'd like to do? ✨");
-      return null;
+      return {
+        chat: `🤖 I'm here to help, ${username}! What would you like to do in Minecraft? ✨`,
+        command: null
+      };
     }
   }
 
-  // Utility method to validate build size
   validateBuildSize(commands) {
-    const maxSize = config.bot.maxBuildSize;
-    
+    // Simple validation to prevent massive builds
     for (const command of commands) {
       if (command.includes('fill')) {
-        // Basic size validation for fill commands
-        const coords = command.match(/~?-?\d+/g);
-        if (coords && coords.length >= 6) {
-          const [x1, y1, z1, x2, y2, z2] = coords.map(c => Math.abs(parseInt(c.replace('~', '')) || 0));
-          const volume = Math.abs(x2 - x1) * Math.abs(y2 - y1) * Math.abs(z2 - z1);
+        const numbers = command.match(/-?\d+/g);
+        if (numbers && numbers.length >= 6) {
+          const [x1, y1, z1, x2, y2, z2] = numbers.map(Number);
+          const sizeX = Math.abs(x2 - x1);
+          const sizeY = Math.abs(y2 - y1);
+          const sizeZ = Math.abs(z2 - z1);
           
-          if (volume > maxSize) {
+          if (sizeX > 50 || sizeY > 50 || sizeZ > 50) {
             return false;
           }
         }
       }
     }
-    
     return true;
   }
 } 
