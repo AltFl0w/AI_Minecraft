@@ -5,10 +5,12 @@ services:
     build: .
     container_name: ai-minecraft-bot
     restart: unless-stopped
-    network_mode: host  # Use host networking to access localhost services
+    # Use bridge networking instead of host networking
+    networks:
+      - minecraft-network
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - SERVER_IP=${SERVER_IP:-localhost}
+      - SERVER_IP=${SERVER_IP:-host.docker.internal}  # Use Docker's host gateway
       - PORT=${PORT:-19132}
       - BOT_NAME=${BOT_NAME:-AI_Admin}
       - DEBUG_MODE=${DEBUG_MODE:-true}
@@ -23,7 +25,11 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 40s
+
+networks:
+  minecraft-network:
+    driver: bridge
 
 # Note: When using host networking, custom networks are not needed
 # The container will use the host's network stack directly
