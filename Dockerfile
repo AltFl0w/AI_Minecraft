@@ -1,24 +1,19 @@
-FROM node:18-alpine
+FROM node:18
 
 # Set working directory
 WORKDIR /usr/src/app
 
-# Install system dependencies for bedrock-protocol
-RUN apk add --no-cache python3 make g++
-
 # Copy package files first for better caching
 COPY package*.json ./
 
-# Install dependencies with verbose logging
-RUN npm ci --only=production --verbose
+# Install dependencies
+RUN npm install --production
 
 # Copy the rest of the application
 COPY . .
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nodejs -u 1001
-USER nodejs
+# Create logs and structures directories
+RUN mkdir -p logs structures
 
 # Expose port (if needed for health checks)
 EXPOSE 3000
