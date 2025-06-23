@@ -4,11 +4,12 @@ FROM node:18
 # Set working directory
 WORKDIR /usr/src/app
 
-# Install build dependencies that might be needed for native modules
+# Install build dependencies including CMake for raknet-native
 RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Fix common Docker npm install SSL issues
