@@ -1,4 +1,5 @@
 # Environment variables (contains API keys)
+.env
 
 # IDE/Editor history files
 .history/
